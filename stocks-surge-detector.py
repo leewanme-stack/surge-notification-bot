@@ -1,6 +1,6 @@
 # =============================
-# stocks-surge-detector.py – RENDER.COM 2025 (Python 3.12.7+)
-# Fixes: JSONDecodeError, premarket flakiness, rate limits
+# stocks-surge-detector.py – RENDER.COM 2025 (Python 3.12.7)
+# NO JSONDecodeError, NO syntax errors, NO .style
 # =============================
 import os, sys, argparse, pandas as pd, numpy as np, yfinance as yf, logging, pickle, smtplib
 from email.mime.text import MIMEText
@@ -17,8 +17,6 @@ from bs4 import BeautifulSoup
 from sklearn.ensemble import IsolationForest
 import time
 import random
-import json
-from urllib.error import HTTPError
 
 # ── CONFIG ─────────────────────────────────────
 BASE_DIR = os.environ.get('APP_DIR', '/tmp/surge')
@@ -57,7 +55,6 @@ USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0',
 ]
 
-# ── SESSION WITH RETRY ────────────────────────
 def get_session():
     session = requests.Session()
     from requests.adapters import HTTPAdapter
@@ -105,14 +102,18 @@ breaker = CircuitBreaker()
 # ── TICKER LIST ───────────────────────────────
 @retry(tries=3, delay=2, backoff=2)
 def download_ticker_lists():
-    ftp = FTP('ftp.nasdaqtrader.com', timeout=30)
-    ftp.login('anonymous', '')
-    ftp.cwd('SymbolDirectory')
-    for file in ['nasdaqlisted.txt', 'otherlisted.txt']:
-        local_path = os.path.join(BASE_DIR, file)
-        with open(local_path, 'wb') as f:
-            ftp.retrbinary(f'RETR {file}', f.write)
-    ftp.quit()
+    try:
+        ftp = FTP('ftp.nasdaqtrader.com', timeout=30)
+        ftp.login('anonymous', '')
+        ftp.cwd('SymbolDirectory')
+        for file in ['nasdaqlisted.txt', 'otherlisted.txt']:
+            local_path = os.path.join(BASE_DIR, file)
+            with open(local_path, 'wb') as f:
+                ftp.retrbinary(f'RETR {file}', f.write)
+        ftp.quit()
+    except Exception as e:
+        logging.error(f"FTP download failed: {e}")
+        raise
 
 def get_all_tickers():
     try:
@@ -159,151 +160,7 @@ def save_price_cache(prices):
     except Exception as e:
         logging.warning(f"Cache save failed: {e}")
 
-# ──────────────────────────────────────────────────────────────────────
-#  SAFE YFINANCE WRAPPERS – NO SYNTAX ERROR, NO JSONDECODEERROR
-# ──────────────────────────────────────────────────────────────────────
-@retry(tries=7, delay=3, backoff=2)
-def safe_yf_download(ticker, period='120d'):
-    try:
-        data = yf.download(
-            ticker,
-            period=period,
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-            repair=True,
-            timeout=30
-        )
-        if data is None or data.empty:
-            logging.info(f"safe_yf_download: Empty response for {ticker}")
-            return pd.DataFrame()
-
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.droplevel(1)
-
-        if 'Close' not in data.columns:
-            return pd.DataFrame()
-
-        return data
-
-    except Exception as e:                     # ← REQUIRED FOR @retry
-        if any(k in str(e) for k in ['JSONDecodeError', 'Expecting value', '404']):
-            logging.info(f"safe_yf_download: Invalid JSON for {ticker}")
-        else:
-            logging.warning(f"safe_yf_download failed for {ticker}: {e}")
-        return pd.DataFrame()
-
-
-@retry(tries=7, delay=3, backoff=2)
-def get_premarket_data(ticker):
-    try:
-        data = yf.download(
-            ticker,
-            period='1d',
-            interval='1m',
-            prepost=True,
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-            timeout=30
-        )
-        if data.empty:
-            return None, None, None
-
-        pre = data.between_time('04:00', '09:30')
-        if pre.empty:
-            return None, None, None
-
-        price = pre['Close'].iloc[-1]
-        vol   = int(pre['Volume'].sum())
-        return float(price), vol, pre
-
-    except Exception as e:                     # ← REQUIRED FOR @retry
-        if 'JSONDecodeError' in str(e) or 'Expecting value' in str(e):
-            logging.info(f"get_premarket_data: Empty premarket for {ticker}")
-        else:
-            logging.warning(f"get_premarket_data failed: {e}")
-        return None, None, None
-
-
-@retry(tries=5, delay=2, backoff=1.5)
-def get_yesterday_close(ticker):
-    try:
-        data = yf.download(
-            ticker,
-            period='5d',
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-            timeout=30
-        )
-        if data.empty or len(data) < 2:
-            return None
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.droplevel(1)
-        return float(data['Close'].iloc[-2])
-
-    except Exception as e:                     # ← REQUIRED FOR @retry
-        if 'JSONDecodeError' in str(e):
-            logging.info(f"get_yesterday_close: No data for {ticker}")
-        return None
-
-
-@retry(tries=7, delay=3, backoff=2)
-def filter_penny_chunk(chunk):
-    try:
-        data = yf.download(
-            chunk,
-            period='5d',
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-            repair=True,
-            timeout=30
-        )
-        if data is None or data.empty:
-            return [], {}
-
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.droplevel(1)
-
-        if 'Close' not in data.columns:
-            return [], {}
-
-        latest = data['Close'].iloc[-2]
-        latest = latest.dropna()
-        valid  = latest[(latest >= MIN_PRICE) & (latest <= MAX_PRICE)]
-        return valid.index.tolist(), valid.to_dict()
-
-    except Exception as e:                     # ← REQUIRED FOR @retry
-        if any(k in str(e) for k in ['JSONDecodeError', 'Expecting value', '404']):
-            logging.info(f"filter_penny_chunk: Empty chunk {chunk}")
-        else:
-            logging.warning(f"filter_penny_chunk failed: {e}")
-        return [], {}
-
-@retry(tries=5, delay=2, backoff=1.5)
-def get_yesterday_close(ticker):
-    try:
-        data = yf.download(
-            ticker,
-            period='5d',
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-            timeout=30
-        )
-        if data.empty or len(data) < 2:
-            return None
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.droplevel(1)
-        return float(data['Close'].iloc[-2])
-    except Exception as e:
-        if 'JSONDecodeError' in str(e):
-            logging.info(f"get_yesterday_close: No data for {ticker}")
-        return None
-
-
+# ── PENNY FILTER (NO JSON CRASH) ───────────────
 @retry(tries=7, delay=3, backoff=2)
 def filter_penny_chunk(chunk):
     try:
@@ -328,7 +185,74 @@ def filter_penny_chunk(chunk):
         latest = data['Close'].iloc[-2]
         latest = latest.dropna()
         valid = latest[(latest >= MIN_PRICE) & (latest <= MAX_PRICE)]
-        return valid.index.tolist(), valid.to_dict
+        return valid.index.tolist(), valid.to_dict()
+
+    except Exception as e:
+        if any(k in str(e) for k in ['JSONDecodeError', 'Expecting value', '404']):
+            logging.info(f"filter_penny_chunk: Empty chunk {chunk}")
+        else:
+            logging.warning(f"filter_penny_chunk failed: {e}")
+        return [], {}
+
+def filter_penny_stocks(tickers, force_refresh=False, debug_ticker=None):
+    tickers = [t for t in tickers if t and isinstance(t, str)]
+    if not tickers: return []
+    if force_refresh or debug_ticker:
+        clear_price_cache()
+    cache = load_price_cache()
+    to_download = [t for t in tickers if t not in cache]
+    new_prices = {}
+    if to_download:
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futures = [ex.submit(filter_penny_chunk, to_download[i:i+15]) 
+                      for i in range(0, len(to_download), 15)]
+            for f in tqdm(as_completed(futures), total=len(futures), desc="Filtering Pennies"):
+                p, pr = f.result()
+                new_prices.update(pr)
+                time.sleep(1.0)
+    cache.update(new_prices)
+    save_price_cache(cache)
+    penny = [t for t in tickers if t in cache and MIN_PRICE <= cache[t] <= MAX_PRICE]
+    if debug_ticker and debug_ticker not in penny:
+        cur = get_yesterday_close(debug_ticker)
+        if cur and MIN_PRICE <= cur <= MAX_PRICE:
+            penny.append(debug_ticker)
+            cache[debug_ticker] = cur
+            save_price_cache(cache)
+    logging.info(f"Penny stocks ($0.10–$5): {len(penny)}")
+    return list(set(penny))
+
+# ── SAFE YFINANCE WRAPPERS (NO CRASH) ───────────
+@retry(tries=7, delay=3, backoff=2)
+def safe_yf_download(ticker, period='120d'):
+    try:
+        data = yf.download(
+            ticker,
+            period=period,
+            progress=False,
+            auto_adjust=False,
+            threads=True,
+            repair=True,
+            timeout=30
+        )
+        if data is None or data.empty:
+            logging.info(f"safe_yf_download: Empty response for {ticker}")
+            return pd.DataFrame()
+
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.droplevel(1)
+
+        if 'Close' not in data.columns:
+            return pd.DataFrame()
+
+        return data
+
+    except Exception as e:
+        if any(k in str(e) for k in ['JSONDecodeError', 'Expecting value', '404']):
+            logging.info(f"safe_yf_download: Invalid JSON for {ticker}")
+        else:
+            logging.warning(f"safe_yf_download failed for {ticker}: {e}")
+        return pd.DataFrame()
 
 @retry(tries=7, delay=3, backoff=2)
 def get_premarket_data(ticker):
@@ -385,17 +309,26 @@ def get_yesterday_close(ticker):
 @retry(tries=7, delay=3, backoff=2)
 def get_today_data(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        hist = breaker.call(stock.history, period="1d", interval="1d", prepost=True)
-        if hist.empty: return None, None
-        close = hist['Close'].iloc[-1].item()
-        volume = int(hist['Volume'].iloc[-1]) if pd.notna(hist['Volume'].iloc[-1]) else 0
-        return close, volume
+        data = yf.download(
+            ticker,
+            period='1d',
+            interval='1d',
+            prepost=True,
+            progress=False,
+            auto_adjust=False,
+            threads=True,
+            timeout=30
+        )
+        if data.empty:
+            return None, None
+        close = data['Close'].iloc[-1]
+        volume = int(data['Volume'].iloc[-1]) if pd.notna(data['Volume'].iloc[-1]) else 0
+        return float(close), volume
     except Exception as e:
-        logging.error(f"Today data failed for {ticker}: {e}")
+        logging.error(f"get_today_data failed for {ticker}: {e}")
         return None, None
 
-# ── TECHNICALS & SURGE LOGIC (unchanged) ──────
+# ── TECHNICALS & SURGE LOGIC ───────────────────
 def calculate_technicals(df):
     df = df.copy()
     close = df['Close'].copy()
@@ -455,7 +388,7 @@ def get_news_sentiment(ticker):
         logging.error(f"News error {ticker}: {e}")
         return 0.0
 
-# ── PROCESS TICKER (WITH PREMARKET FALLBACK) ──
+# ── PROCESS TICKER (WITH FALLBACK) ─────────────
 def process_ticker(args):
     ticker, _, extra = args
     debug = extra.get("debug", False)
@@ -514,7 +447,6 @@ def process_ticker(args):
             'surge_time': surge_time
         }
     else:
-        # Intraday logic unchanged
         today_close, today_vol = get_today_data(ticker)
         if today_close is None or today_vol < MIN_VOLUME: return None
         intraday_return = (today_close - yesterday_close) / yesterday_close
@@ -538,7 +470,7 @@ def process_ticker(args):
             'surge_time': surge_time
         }
 
-# ── FEATURE EXTRACTION & OUTPUT (unchanged from last) ──
+# ── FEATURE EXTRACTION & OUTPUT ────────────────
 def extract_features(_, tickers, mode="premarket", debug=False):
     tasks = [(t, None, {"debug": debug, "mode": mode}) for t in tickers]
     features = []
@@ -566,10 +498,129 @@ def detect_surging_stocks(df, mode):
         return []
     return candidates.sort_values('expected_price', ascending=False).to_dict('records')
 
+# ── GENERATE OUTPUT (PURE HTML) ────────────────
 def generate_output(results, start_time, mode):
-    # ... [same pure-HTML version from previous response] ...
-    # (Omitted for brevity – use the one from the last working version)
-    pass  # Replace with full generate_output from previous
+    if not results:
+        results = []
+    df = pd.DataFrame(results)
+
+    if df.empty:
+        pd.DataFrame(columns=[
+            'Ticker','Surge Time','Yesterday','Current','Exp Price','Gap','Volume','Ratio',
+            'Anomaly','RSI','News','Score','Sentiment','Action'
+        ]).to_csv(CSV_OUT, index=False)
+        html_table = '<p style="color:#666;font-style:italic;">No surge candidates detected.</p>'
+    else:
+        rename_map = {
+            'ticker':'Ticker','surge_time':'Surge Time','yesterday_close':'Yesterday','current_price':'Current',
+            'gap':'Gap','return':'Gap','volume':'Volume','vol_ratio':'Ratio','vol_anomaly':'Anomaly',
+            'rsi':'RSI','news_sentiment':'News','score':'Score','sentiment':'Sentiment','action':'Action',
+            'expected_price': 'Exp Price', 'expected_return': 'Exp Return'
+        }
+        df = df.rename(columns=rename_map)
+
+        num_cols = ['Gap','Ratio','Anomaly','RSI','News','Score','Volume','Exp Price','Exp Return']
+        for col in num_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['Gap'] = df['Gap'].fillna(0)
+        df['Ratio'] = df['Ratio'].fillna(0)
+        df['Anomaly'] = df['Anomaly'].fillna(0).astype(int)
+        df['RSI'] = df['RSI'].fillna(50.0)
+        df['News'] = df['News'].fillna(0.0)
+        df['Score'] = df['Score'].fillna(0).astype(int)
+        df['Volume'] = df['Volume'].fillna(0).astype(int)
+        df['Exp Price'] = df['Exp Price'].fillna(0.0)
+        df['Exp Return'] = df['Exp Return'].fillna(0.0)
+
+        rows = []
+        for _, r in df.iterrows():
+            gap_style = 'color:#16a34a;font-weight:600' if r['Gap'] > 0 else 'color:#dc2626;font-weight:600'
+            sent_bg = '#16a34a' if r['Sentiment'] == 'Bullish' else '#dc2626' if r['Sentiment'] == 'Bearish' else '#6b7280'
+            sent_fg = '#fff'
+            act_bg = '#16a34a' if r['Action'] == 'Buy' else '#dc2626' if r['Action'] == 'Sell' else '#f97316'
+            act_fg = '#fff'
+            surge_bg = '#1e40af'
+            surge_fg = 'white'
+
+            rows.append(f"""
+            <tr>
+                <td style="text-align:left">{r['Ticker']}</td>
+                <td style="text-align:right">{r['Yesterday']:.2f}</td>
+                <td style="text-align:right">{r['Current']:.2f}</td>
+                <td style="text-align:right">{r['Exp Price']:.2f}</td>
+                <td style="text-align:center"><span style="background:{surge_bg};color:{surge_fg};padding:4px 10px;border-radius:6px;font-weight:600;">{r['Surge Time']} CST</span></td>
+                <td style="text-align:right;{gap_style}">{r['Gap']:+.1%}</td>
+                <td style="text-align:right">{r['Volume']:,}</td>
+                <td style="text-align:right">{r['Ratio']:.1f}x</td>
+                <td style="text-align:right">{r['Anomaly']}</td>
+                <td style="text-align:right">{r['RSI']:.1f}</td>
+                <td style="text-align:right">{r['News']:+.2f}</td>
+                <td style="text-align:right">{r['Score']:.0f}</td>
+                <td style="text-align:center"><span style="background:{sent_bg};color:{sent_fg};padding:6px 14px;border-radius:9999px;font-weight:600;">{r['Sentiment']}</span></td>
+                <td style="text-align:center"><span style="background:{act_bg};color:{act_fg};padding:6px 14px;border-radius:9999px;font-weight:600;">{r['Action']}</span></td>
+            </tr>
+            """)
+
+        html_table = f"""
+        <table style="width:100%;border-collapse:collapse;margin-top:20px;font-size:.95em">
+            <thead>
+                <tr style="background:#1e40af;color:white">
+                    <th style="padding:14px 12px;text-align:left">Ticker</th>
+                    <th style="padding:14px 12px;text-align:right">Yesterday</th>
+                    <th style="padding:14px 12px;text-align:right">Current</th>
+                    <th style="padding:14px 12px;text-align:right">Exp Price</th>
+                    <th style="padding:14px 12px;text-align:center">Surge Time</th>
+                    <th style="padding:14px 12px;text-align:right">Gap</th>
+                    <th style="padding:14px 12px;text-align:right">Volume</th>
+                    <th style="padding:14px 12px;text-align:right">Ratio</th>
+                    <th style="padding:14px 12px;text-align:right">Anomaly</th>
+                    <th style="padding:14px 12px;text-align:right">RSI</th>
+                    <th style="padding:14px 12px;text-align:right">News</th>
+                    <th style="padding:14px 12px;text-align:right">Score</th>
+                    <th style="padding:14px 12px;text-align:center">Sentiment</th>
+                    <th style="padding:14px 12px;text-align:center">Action</th>
+                </tr>
+            </thead>
+            <tbody>{''.join(rows)}</tbody>
+        </table>
+        """
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>{mode.upper()} Surge Report</title>
+<style>
+body{{font-family:system-ui;margin:40px;background:#f0f4f8}}
+.container{{max-width:1200px;margin:auto;background:white;padding:30px;border-radius:16px;box-shadow:0 4px 20px rgba(0,0,0,.1)}}
+.header-title{{font-size:2em;margin:0 0 8px;color:#1e40af;text-align:center}}
+</style></head>
+<body><div class="container">
+<h1 class="header-title">Penny Stocks Surge Report</h1>
+<h3 style="text-align:center">{start_time.strftime('%Y-%m-%d')}</h3>
+<p style="text-align:center"><strong>Mode:</strong> {mode.upper()} | <strong>Signals:</strong> {len(results)}</p>
+{html_table}
+<p style="text-align:center"><strong>Generated:</strong> {start_time.strftime('%Y-%m-%d %H:%M:%S %Z')}</p>
+</div></body></html>"""
+
+    with open(HTML_OUT, 'w', encoding='utf-8') as f:
+        f.write(html)
+
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_SENDER
+        msg['Subject'] = f"{mode.upper()} SURGE - {len(results)} Signals"
+        if USE_BCC and len(EMAIL_RECIPIENTS) > 1:
+            msg['To'] = EMAIL_SENDER
+            msg['Bcc'] = ', '.join(EMAIL_RECIPIENTS)
+        else:
+            msg['To'] = ', '.join(EMAIL_RECIPIENTS)
+        msg.attach(MIMEText(html, 'html'))
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+        logging.info(f"Email sent to {len(EMAIL_RECIPIENTS)} recipients")
+    except Exception as e:
+        logging.error(f"Email failed: {e}")
 
 # ── MAIN ───────────────────────────────────────
 def main(mode="premarket", debug_ticker=None, debug=False):
@@ -596,8 +647,3 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     main(mode=args.mode, debug_ticker=args.debug_ticker, debug=args.debug)
-
-
-
-
-
