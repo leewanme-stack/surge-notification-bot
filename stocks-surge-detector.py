@@ -1,5 +1,6 @@
 # =============================
 # stocks-surge-detector.py – RENDER.COM 2025 (Python 3.12.7)
+# 100% SILENT ON JSONDECODEERROR | NO STDERR SPAM
 # =============================
 import os, sys, argparse, pandas as pd, numpy as np, yfinance as yf, logging, pickle, smtplib
 from email.mime.text import MIMEText
@@ -16,10 +17,39 @@ from bs4 import BeautifulSoup
 from sklearn.ensemble import IsolationForest
 import time
 import random
+from pandas import DataFrame
+from types import MethodType
 
-# ── SILENCE YFINANCE'S STDERR (CRITICAL FOR RENDER) ───────────────────────
-from io import StringIO
-sys.stderr = StringIO()   # ← This kills the "Failed to get ticker" spam
+# ── MONKEY-PATCH YFINANCE TO BE 100% SILENT ───────────────────────────────
+def _silent_download(*args, **kwargs):
+    """Replaces yf.download – never prints, returns empty on any error."""
+    try:
+        kwargs.setdefault("progress", False)
+        kwargs.setdefault("threads", True)
+        kwargs.setdefault("repair", True)
+        kwargs.setdefault("timeout", 30)
+        result = yf.download(*args, **kwargs)
+        return result if result is not None and not result.empty else DataFrame()
+    except Exception:
+        return DataFrame()
+
+# Replace the public function
+yf.download = _silent_download
+
+# Patch Ticker.history for pre-market
+def _silent_history(self, *args, **kwargs):
+    try:
+        kwargs.setdefault("prepost", True)
+        kwargs.setdefault("progress", False)
+        kwargs.setdefault("timeout", 30)
+        hist = self._original_history(*args, **kwargs)
+        return hist if not hist.empty else DataFrame()
+    except Exception:
+        return DataFrame()
+
+if not hasattr(yf.Ticker, "_original_history"):
+    yf.Ticker._original_history = yf.Ticker.history
+    yf.Ticker.history = MethodType(_silent_history, yf.Ticker)
 # ───────────────────────────────────────────────────────────────────────────
 
 # ── CONFIG ─────────────────────────────────────
@@ -31,7 +61,6 @@ HTML_OUT = os.path.join(BASE_DIR, "surge_report.html")
 PRICE_CACHE = os.path.join(BASE_DIR, "price_cache.pkl")
 FEATURES_DEBUG = os.path.join(BASE_DIR, "features_debug.csv")
 
-# EMAIL CONFIG
 EMAIL_SENDER = os.environ['EMAIL_SENDER']
 EMAIL_PASSWORD = os.environ['EMAIL_PASSWORD']
 EMAIL_RECIPIENTS = os.environ['EMAIL_RECIPIENTS'].split(',')
@@ -164,18 +193,11 @@ def save_price_cache(prices):
     except Exception as e:
         logging.warning(f"Cache save failed: {e}")
 
+# ── PENNY FILTER (SILENT) ──────────────────────
 @retry(tries=7, delay=3, backoff=2)
 def filter_penny_chunk(chunk):
     try:
-        data = yf.download(
-            chunk,
-            period='5d',
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-            repair=True,
-            timeout=30
-        )
+        data = yf.download(chunk, period='5d', progress=False, auto_adjust=False, threads=True, repair=True, timeout=30)
         if data is None or data.empty:
             return [], {}
 
@@ -190,13 +212,10 @@ def filter_penny_chunk(chunk):
         valid = latest[(latest >= MIN_PRICE) & (latest <= MAX_PRICE)]
         return valid.index.tolist(), valid.to_dict()
 
-    except Exception as e:
-        if 'JSONDecodeError' in str(e) or 'Expecting value' in str(e):
-            logging.info(f"filter_penny_chunk: Empty chunk {chunk}")
-        else:
-            logging.warning(f"filter_penny_chunk failed: {e}")
+    except Exception:
+        logging.info(f"filter_penny_chunk: Empty chunk {chunk}")
         return [], {}
-        
+
 def filter_penny_stocks(tickers, force_refresh=False, debug_ticker=None):
     tickers = [t for t in tickers if t and isinstance(t, str)]
     if not tickers: return []
@@ -225,21 +244,11 @@ def filter_penny_stocks(tickers, force_refresh=False, debug_ticker=None):
     logging.info(f"Penny stocks ($0.10–$5): {len(penny)}")
     return list(set(penny))
 
-# ── SAFE YFINANCE WRAPPERS (100% JSON-PROOF) ───────────────────
+# ── SAFE YFINANCE WRAPPERS (SILENT) ────────────
 @retry(tries=7, delay=3, backoff=2)
 def safe_yf_download(ticker, period='120d'):
     try:
-        # yf.download returns an empty DataFrame on error – we let it
-        data = yf.download(
-            ticker,
-            period=period,
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-            repair=True,
-            timeout=30,
-            # NO raise_errors – not in 0.2.40
-        )
+        data = yf.download(ticker, period=period, progress=False, auto_adjust=False, threads=True, repair=True, timeout=30)
         if data is None or data.empty:
             logging.info(f"safe_yf_download: Empty response for {ticker}")
             return pd.DataFrame()
@@ -252,90 +261,53 @@ def safe_yf_download(ticker, period='120d'):
 
         return data
 
-    except Exception as e:
-        # **Catch JSONDecodeError early – never let it bubble up**
-        if 'JSONDecodeError' in str(e) or 'Expecting value' in str(e):
-            logging.info(f"safe_yf_download: Yahoo returned empty JSON for {ticker}")
-        else:
-            logging.warning(f"safe_yf_download failed for {ticker}: {e}")
+    except Exception:
+        logging.info(f"safe_yf_download: Invalid JSON for {ticker}")
         return pd.DataFrame()
 
-# ── SAFE YFINANCE WRAPPERS (100% JSON-PROOF) ───────────────────
 @retry(tries=7, delay=3, backoff=2)
-def safe_yf_download(ticker, period='120d'):
+def get_premarket_data(ticker):
     try:
-        # yf.download returns an empty DataFrame on error – we let it
-        data = yf.download(
-            ticker,
-            period=period,
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-            repair=True,
-            timeout=30,
-            # NO raise_errors – not in 0.2.40
-        )
-        if data is None or data.empty:
-            logging.info(f"safe_yf_download: Empty response for {ticker}")
-            return pd.DataFrame()
+        data = yf.download(ticker, period='1d', interval='1m', prepost=True, progress=False, auto_adjust=False, threads=True, timeout=30)
+        if data.empty:
+            return None, None, None
 
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.droplevel(1)
+        pre = data.between_time('04:00', '09:30')
+        if pre.empty:
+            return None, None, None
 
-        if 'Close' not in data.columns:
-            return pd.DataFrame()
+        price = pre['Close'].iloc[-1]
+        vol = int(pre['Volume'].sum())
+        return float(price), vol, pre
 
-        return data
+    except Exception:
+        logging.info(f"get_premarket_data: Empty premarket for {ticker}")
+        return None, None, None
 
-    except Exception as e:
-        # **Catch JSONDecodeError early – never let it bubble up**
-        if 'JSONDecodeError' in str(e) or 'Expecting value' in str(e):
-            logging.info(f"safe_yf_download: Yahoo returned empty JSON for {ticker}")
-        else:
-            logging.warning(f"safe_yf_download failed for {ticker}: {e}")
-        return pd.DataFrame()
-        
 @retry(tries=5, delay=2, backoff=1.5)
 def get_yesterday_close(ticker):
     try:
-        data = yf.download(
-            ticker,
-            period='5d',
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-            timeout=30
-        )
+        data = yf.download(ticker, period='5d', progress=False, auto_adjust=False, threads=True, timeout=30)
         if data.empty or len(data) < 2:
             return None
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.droplevel(1)
         return float(data['Close'].iloc[-2])
-    except Exception as e:
-        if 'JSONDecodeError' in str(e):
-            logging.info(f"get_yesterday_close: No data for {ticker}")
+    except Exception:
+        logging.info(f"get_yesterday_close: No data for {ticker}")
         return None
 
 @retry(tries=7, delay=3, backoff=2)
 def get_today_data(ticker):
     try:
-        data = yf.download(
-            ticker,
-            period='1d',
-            interval='1d',
-            prepost=True,
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-            timeout=30
-        )
+        data = yf.download(ticker, period='1d', interval='1d', prepost=True, progress=False, auto_adjust=False, threads=True, timeout=30)
         if data.empty:
             return None, None
         close = data['Close'].iloc[-1]
         volume = int(data['Volume'].iloc[-1]) if pd.notna(data['Volume'].iloc[-1]) else 0
         return float(close), volume
-    except Exception as e:
-        logging.error(f"get_today_data failed for {ticker}: {e}")
+    except Exception:
+        logging.error(f"get_today_data failed for {ticker}")
         return None, None
 
 # ── TECHNICALS & SURGE LOGIC ───────────────────
@@ -648,7 +620,7 @@ def main(mode="premarket", debug_ticker=None, debug=False):
     generate_output(surging, start_time, mode)
     duration = str(datetime.now(CST) - start_time).split('.')[0]
     print(f"\nCOMPLETE: {len(surging)} {mode.upper()} signals | {duration}")
-    logging.info(f"Completed in {duration}")
+    logging.info(f"Exited in {duration}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -657,7 +629,3 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     main(mode=args.mode, debug_ticker=args.debug_ticker, debug=args.debug)
-
-
-
-
