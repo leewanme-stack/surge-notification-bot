@@ -17,10 +17,9 @@ from sklearn.ensemble import IsolationForest
 import time
 import random
 
-
-# ── SILENCE YFINANCE ───────────────────────────────────────────────────────
-logging.getLogger("yfinance").setLevel(logging.CRITICAL)
-logging.getLogger("yfinance").propagate = False
+# ── SILENCE YFINANCE'S STDERR (CRITICAL FOR RENDER) ───────────────────────
+from io import StringIO
+sys.stderr = StringIO()   # ← This kills the "Failed to get ticker" spam
 # ───────────────────────────────────────────────────────────────────────────
 
 # ── CONFIG ─────────────────────────────────────
@@ -658,6 +657,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     main(mode=args.mode, debug_ticker=args.debug_ticker, debug=args.debug)
+
 
 
 
