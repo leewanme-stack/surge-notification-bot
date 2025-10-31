@@ -17,6 +17,8 @@ from bs4 import BeautifulSoup
 from sklearn.ensemble import IsolationForest
 import time
 import random
+import json
+from urllib.error import HTTPError
 
 # ── CONFIG ─────────────────────────────────────
 BASE_DIR = os.environ.get('APP_DIR', '/tmp/surge')
@@ -216,40 +218,63 @@ def filter_penny_stocks(tickers, force_refresh=False, debug_ticker=None):
 @retry(tries=7, delay=3, backoff=2)
 def safe_yf_download(ticker, period='120d'):
     try:
-        data = breaker.call(
-            yf.download,
-            ticker,
+        # Use yfinance's internal session with raw response check
+        ticker_obj = yf.Ticker(ticker)
+        hist = ticker_obj.history(
             period=period,
-            progress=False,
+            interval="1d",
             auto_adjust=False,
-            threads=True,
+            actions=False,
             repair=True,
-            timeout=30
+            progress=False,
+            timeout=30,
+            raise_errors=False  # Important!
         )
-        if data is None or data.empty or 'Close' not in data.columns:
-            logging.info(f"No data for {ticker} (premarket/low vol?)")
+        if hist is None or hist.empty:
+            logging.info(f"No data for {ticker} (empty response)")
             return pd.DataFrame()
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.droplevel(1)
-        return data
+
+        # Final safeguard: ensure 'Close' exists
+        if 'Close' not in hist.columns:
+            return pd.DataFrame()
+        return hist
+
     except Exception as e:
-        if 'JSONDecodeError' in str(e):
-            logging.warning(f"Yahoo returned empty JSON for {ticker}")
+        if 'JSONDecodeError' in str(e) or 'Expecting value' in str(e):
+            logging.warning(f"Yahoo returned empty JSON for {ticker} – skipping")
+        else:
+            logging.warning(f"Download failed for {ticker}: {e}")
         return pd.DataFrame()
 
 @retry(tries=7, delay=3, backoff=2)
 def get_premarket_data(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        hist = breaker.call(stock.history, period='1d', interval='1m', prepost=True)
-        if hist.empty: return None, None, None
-        pre = hist.between_time('04:00', '09:30').copy()
-        if pre.empty: return None, None, None
-        price = pre['Close'].iloc[-1].item()
+        ticker_obj = yf.Ticker(ticker)
+        hist = ticker_obj.history(
+            period='1d',
+            interval='1m',
+            prepost=True,
+            auto_adjust=False,
+            progress=False,
+            timeout=30,
+            raise_errors=False
+        )
+        if hist.empty:
+            return None, None, None
+
+        pre = hist.between_time('04:00', '09:30')
+        if pre.empty:
+            return None, None, None
+
+        price = pre['Close'].iloc[-1]
         vol = int(pre['Volume'].sum())
         return price, vol, pre
+
     except Exception as e:
-        logging.warning(f"Premarket failed for {ticker}: {e}")
+        if 'JSONDecodeError' in str(e):
+            logging.info(f"Premarket empty for {ticker}")
+        else:
+            logging.warning(f"Premarket failed: {e}")
         return None, None, None
 
 @retry(tries=3, delay=1)
@@ -476,3 +501,4 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     main(mode=args.mode, debug_ticker=args.debug_ticker, debug=args.debug)
+
