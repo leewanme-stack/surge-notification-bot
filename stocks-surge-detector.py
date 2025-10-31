@@ -1,5 +1,5 @@
 # =============================
-# stocks-surge-detector.py – RENDER.COM READY (no jinja2)
+# stocks-surge-detector.py – RENDER.COM READY (NO jinja2)
 # =============================
 import os, sys, argparse, pandas as pd, numpy as np, yfinance as yf, logging, pickle, smtplib, gzip
 from email.mime.text import MIMEText
@@ -421,12 +421,13 @@ def detect_surging_stocks(df, mode):
         return []
     return candidates.sort_values('expected_price', ascending=False).to_dict('records')
 
-# ── GENERATE HTML TABLE (NO .style / jinja2) ─────
+# ── GENERATE OUTPUT (PURE HTML – NO .style) ─────
 def generate_output(results, start_time, mode):
     if not results:
         results = []
     df = pd.DataFrame(results)
-    
+
+    # Save CSV
     if df.empty:
         pd.DataFrame(columns=[
             'Ticker','Surge Time','Yesterday','Current','Exp Price','Gap','Volume','Ratio',
@@ -441,9 +442,14 @@ def generate_output(results, start_time, mode):
             'expected_price': 'Exp Price', 'expected_return': 'Exp Return'
         }
         df = df.rename(columns=rename_map)
-        for col in ['Gap','Ratio','Anomaly','RSI','News','Score','Volume','Exp Price','Exp Return']:
+
+        # Ensure numeric columns
+        num_cols = ['Gap','Ratio','Anomaly','RSI','News','Score','Volume','Exp Price','Exp Return']
+        for col in num_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # Fill NaN
         df['Gap'] = df['Gap'].fillna(0)
         df['Ratio'] = df['Ratio'].fillna(0)
         df['Anomaly'] = df['Anomaly'].fillna(0).astype(int)
@@ -454,33 +460,33 @@ def generate_output(results, start_time, mode):
         df['Exp Price'] = df['Exp Price'].fillna(0.0)
         df['Exp Return'] = df['Exp Return'].fillna(0.0)
 
-        # === HTML TABLE ===
-        html_rows = []
-        for _, row in df.iterrows():
-            gap_style = 'color:#16a34a;font-weight:600' if row['Gap'] > 0 else 'color:#dc2626;font-weight:600'
-            sentiment_bg = '#16a34a' if row['Sentiment'] == 'Bullish' else '#dc2626' if row['Sentiment'] == 'Bearish' else '#6b7280'
-            sentiment_fg = '#fff'
-            action_bg = '#16a34a' if row['Action'] == 'Buy' else '#dc2626' if row['Action'] == 'Sell' else '#f97316'
-            action_fg = '#fff'
+        # Build HTML rows
+        rows = []
+        for _, r in df.iterrows():
+            gap_style = 'color:#16a34a;font-weight:600' if r['Gap'] > 0 else 'color:#dc2626;font-weight:600'
+            sent_bg = '#16a34a' if r['Sentiment'] == 'Bullish' else '#dc2626' if r['Sentiment'] == 'Bearish' else '#6b7280'
+            sent_fg = '#fff'
+            act_bg = '#16a34a' if r['Action'] == 'Buy' else '#dc2626' if r['Action'] == 'Sell' else '#f97316'
+            act_fg = '#fff'
             surge_bg = '#1e40af'
             surge_fg = 'white'
 
-            html_rows.append(f"""
+            rows.append(f"""
             <tr>
-                <td style="text-align:left">{row['Ticker']}</td>
-                <td style="text-align:right">{row['Yesterday']:.2f}</td>
-                <td style="text-align:right">{row['Current']:.2f}</td>
-                <td style="text-align:right">{row['Exp Price']:.2f}</td>
-                <td style="text-align:center"><span style="background:{surge_bg};color:{surge_fg};padding:4px 10px;border-radius:6px;font-weight:600;">{row['Surge Time']} CST</span></td>
-                <td style="text-align:right;{gap_style}">{row['Gap']:+.1%}</td>
-                <td style="text-align:right">{row['Volume']:,}</td>
-                <td style="text-align:right">{row['Ratio']:.1f}x</td>
-                <td style="text-align:right">{row['Anomaly']}</td>
-                <td style="text-align:right">{row['RSI']:.1f}</td>
-                <td style="text-align:right">{row['News']:+.2f}</td>
-                <td style="text-align:right">{row['Score']:.0f}</td>
-                <td style="text-align:center"><span style="background:{sentiment_bg};color:{sentiment_fg};padding:6px 14px;border-radius:9999px;font-weight:600;">{row['Sentiment']}</span></td>
-                <td style="text-align:center"><span style="background:{action_bg};color:{action_fg};padding:6px 14px;border-radius:9999px;font-weight:600;">{row['Action']}</span></td>
+                <td style="text-align:left">{r['Ticker']}</td>
+                <td style="text-align:right">{r['Yesterday']:.2f}</td>
+                <td style="text-align:right">{r['Current']:.2f}</td>
+                <td style="text-align:right">{r['Exp Price']:.2f}</td>
+                <td style="text-align:center"><span style="background:{surge_bg};color:{surge_fg};padding:4px 10px;border-radius:6px;font-weight:600;">{r['Surge Time']} CST</span></td>
+                <td style="text-align:right;{gap_style}">{r['Gap']:+.1%}</td>
+                <td style="text-align:right">{r['Volume']:,}</td>
+                <td style="text-align:right">{r['Ratio']:.1f}x</td>
+                <td style="text-align:right">{r['Anomaly']}</td>
+                <td style="text-align:right">{r['RSI']:.1f}</td>
+                <td style="text-align:right">{r['News']:+.2f}</td>
+                <td style="text-align:right">{r['Score']:.0f}</td>
+                <td style="text-align:center"><span style="background:{sent_bg};color:{sent_fg};padding:6px 14px;border-radius:9999px;font-weight:600;">{r['Sentiment']}</span></td>
+                <td style="text-align:center"><span style="background:{act_bg};color:{act_fg};padding:6px 14px;border-radius:9999px;font-weight:600;">{r['Action']}</span></td>
             </tr>
             """)
 
@@ -504,41 +510,39 @@ def generate_output(results, start_time, mode):
                     <th style="padding:14px 12px;text-align:center">Action</th>
                 </tr>
             </thead>
-            <tbody>
-                {''.join(html_rows)}
-            </tbody>
+            <tbody>{''.join(rows)}</tbody>
         </table>
         """
 
-        # Sortable JS
+        # Add sortable JS
         sortable_js = """
         <script>
         document.addEventListener('DOMContentLoaded', function() {
             const table = document.querySelector('table');
             if (!table) return;
             const headers = table.querySelectorAll('th');
-            headers.forEach((header, index) => {
-                header.style.cursor = 'pointer';
-                header.onclick = () => sortTable(index);
+            headers.forEach((h, i) => {
+                h.style.cursor = 'pointer';
+                h.onclick = () => sortTable(i);
             });
-            function sortTable(colIdx) {
+            function sortTable(col) {
                 const rows = Array.from(table.querySelectorAll('tbody tr'));
-                const multiplier = table.querySelectorAll('th')[colIdx].classList.toggle('asc') ? 1 : -1;
+                const asc = table.querySelectorAll('th')[col].classList.toggle('asc');
                 table.querySelectorAll('th').forEach(th => th.classList.remove('asc'));
                 rows.sort((a, b) => {
-                    let aText = a.cells[colIdx].innerText.trim();
-                    let bText = b.cells[colIdx].innerText.trim();
-                    let aVal = parseFloat(aText.replace(/[$,%x]/g, '')) || 0;
-                    let bVal = parseFloat(bText.replace(/[$,%x]/g, '')) || 0;
-                    return (aVal > bVal ? 1 : -1) * multiplier;
+                    let aVal = a.cells[col].innerText.replace(/[$,%x]/g, '');
+                    let bVal = b.cells[col].innerText.replace(/[$,%x]/g, '');
+                    aVal = parseFloat(aVal) || 0;
+                    bVal = parseFloat(bVal) || 0;
+                    return (aVal > bVal ? 1 : -1) * (asc ? 1 : -1);
                 });
-                rows.forEach(row => table.querySelector('tbody').appendChild(row));
-                table.querySelectorAll('th')[colIdx].classList.add('asc');
+                rows.forEach(r => table.querySelector('tbody').appendChild(r));
+                table.querySelectorAll('th')[col].classList.add('asc');
             }
             // Auto-sort by Exp Price descending
             setTimeout(() => {
-                const expIdx = Array.from(headers).findIndex(th => th.innerText.includes('Exp Price'));
-                if (expIdx !== -1) { document.querySelectorAll('th')[expIdx].click(); document.querySelectorAll('th')[expIdx].click(); }
+                const idx = Array.from(headers).findIndex(h => h.innerText.includes('Exp Price'));
+                if (idx !== -1) { document.querySelectorAll('th')[idx].click(); document.querySelectorAll('th')[idx].click(); }
             }, 100);
         });
         </script>
@@ -549,7 +553,7 @@ def generate_output(results, start_time, mode):
         """
         html_table += sortable_js
 
-    # === FULL HTML EMAIL ===
+    # Full HTML page
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>{mode.upper()} Surge Report</title>
 <style>
@@ -568,7 +572,7 @@ body{{font-family:system-ui;margin:40px;background:#f0f4f8}}
     with open(HTML_OUT, 'w', encoding='utf-8') as f:
         f.write(html)
 
-    # === SEND EMAIL ===
+    # Email
     try:
         msg = MIMEMultipart()
         msg['From'] = EMAIL_SENDER
