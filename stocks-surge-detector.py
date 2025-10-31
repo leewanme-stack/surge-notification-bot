@@ -160,7 +160,6 @@ def save_price_cache(prices):
     except Exception as e:
         logging.warning(f"Cache save failed: {e}")
 
-# ── PENNY FILTER (NO JSON CRASH) ───────────────
 @retry(tries=7, delay=3, backoff=2)
 def filter_penny_chunk(chunk):
     try:
@@ -188,12 +187,12 @@ def filter_penny_chunk(chunk):
         return valid.index.tolist(), valid.to_dict()
 
     except Exception as e:
-        if any(k in str(e) for k in ['JSONDecodeError', 'Expecting value', '404']):
+        if 'JSONDecodeError' in str(e) or 'Expecting value' in str(e):
             logging.info(f"filter_penny_chunk: Empty chunk {chunk}")
         else:
             logging.warning(f"filter_penny_chunk failed: {e}")
         return [], {}
-
+        
 def filter_penny_stocks(tickers, force_refresh=False, debug_ticker=None):
     tickers = [t for t in tickers if t and isinstance(t, str)]
     if not tickers: return []
@@ -222,10 +221,11 @@ def filter_penny_stocks(tickers, force_refresh=False, debug_ticker=None):
     logging.info(f"Penny stocks ($0.10–$5): {len(penny)}")
     return list(set(penny))
 
-# ── SAFE YFINANCE WRAPPERS (NO CRASH) ───────────
+# ── SAFE YFINANCE WRAPPERS (100% JSON-PROOF) ───────────────────
 @retry(tries=7, delay=3, backoff=2)
 def safe_yf_download(ticker, period='120d'):
     try:
+        # yf.download returns an empty DataFrame on error – we let it
         data = yf.download(
             ticker,
             period=period,
@@ -233,7 +233,8 @@ def safe_yf_download(ticker, period='120d'):
             auto_adjust=False,
             threads=True,
             repair=True,
-            timeout=30
+            timeout=30,
+            # NO raise_errors – not in 0.2.40
         )
         if data is None or data.empty:
             logging.info(f"safe_yf_download: Empty response for {ticker}")
@@ -248,43 +249,48 @@ def safe_yf_download(ticker, period='120d'):
         return data
 
     except Exception as e:
-        if any(k in str(e) for k in ['JSONDecodeError', 'Expecting value', '404']):
-            logging.info(f"safe_yf_download: Invalid JSON for {ticker}")
+        # **Catch JSONDecodeError early – never let it bubble up**
+        if 'JSONDecodeError' in str(e) or 'Expecting value' in str(e):
+            logging.info(f"safe_yf_download: Yahoo returned empty JSON for {ticker}")
         else:
             logging.warning(f"safe_yf_download failed for {ticker}: {e}")
         return pd.DataFrame()
 
+# ── SAFE YFINANCE WRAPPERS (100% JSON-PROOF) ───────────────────
 @retry(tries=7, delay=3, backoff=2)
-def get_premarket_data(ticker):
+def safe_yf_download(ticker, period='120d'):
     try:
+        # yf.download returns an empty DataFrame on error – we let it
         data = yf.download(
             ticker,
-            period='1d',
-            interval='1m',
-            prepost=True,
+            period=period,
             progress=False,
             auto_adjust=False,
             threads=True,
-            timeout=30
+            repair=True,
+            timeout=30,
+            # NO raise_errors – not in 0.2.40
         )
-        if data.empty:
-            return None, None, None
+        if data is None or data.empty:
+            logging.info(f"safe_yf_download: Empty response for {ticker}")
+            return pd.DataFrame()
 
-        pre = data.between_time('04:00', '09:30')
-        if pre.empty:
-            return None, None, None
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.droplevel(1)
 
-        price = pre['Close'].iloc[-1]
-        vol = int(pre['Volume'].sum())
-        return float(price), vol, pre
+        if 'Close' not in data.columns:
+            return pd.DataFrame()
+
+        return data
 
     except Exception as e:
+        # **Catch JSONDecodeError early – never let it bubble up**
         if 'JSONDecodeError' in str(e) or 'Expecting value' in str(e):
-            logging.info(f"get_premarket_data: Empty premarket for {ticker}")
+            logging.info(f"safe_yf_download: Yahoo returned empty JSON for {ticker}")
         else:
-            logging.warning(f"get_premarket_data failed: {e}")
-        return None, None, None
-
+            logging.warning(f"safe_yf_download failed for {ticker}: {e}")
+        return pd.DataFrame()
+        
 @retry(tries=5, delay=2, backoff=1.5)
 def get_yesterday_close(ticker):
     try:
@@ -647,3 +653,4 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     main(mode=args.mode, debug_ticker=args.debug_ticker, debug=args.debug)
+
