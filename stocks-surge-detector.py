@@ -1,6 +1,5 @@
 # =============================
 # stocks-surge-detector.py – RENDER.COM 2025 (Python 3.12.7)
-# NO JSONDecodeError, NO syntax errors, NO .style
 # =============================
 import os, sys, argparse, pandas as pd, numpy as np, yfinance as yf, logging, pickle, smtplib
 from email.mime.text import MIMEText
@@ -17,6 +16,12 @@ from bs4 import BeautifulSoup
 from sklearn.ensemble import IsolationForest
 import time
 import random
+
+# ── SILENCE YFINANCE INTERNAL ERRORS ─────────────────────────────────────
+yf_logger = logging.getLogger("yfinance")
+yf_logger.setLevel(logging.WARNING)   # <-- Stops the "Failed to get ticker" spam
+yf_logger.propagate = False
+# ────────────────────────────────────────────────────────────────────────
 
 # ── CONFIG ─────────────────────────────────────
 BASE_DIR = os.environ.get('APP_DIR', '/tmp/surge')
@@ -653,4 +658,5 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     main(mode=args.mode, debug_ticker=args.debug_ticker, debug=args.debug)
+
 
