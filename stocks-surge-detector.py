@@ -1,7 +1,5 @@
 # =============================
-# stocks-surge-detector.py – CLOUD-OPTIMIZED (Render.com)
-# Fixes: JSONDecodeError, Yahoo rate limits, pdr_override crash
-# Usage: py stocks-surge-detector.py --mode premarket --debug_ticker LUNG
+# stocks-surge-detector.py – RENDER.COM READY (no jinja2)
 # =============================
 import os, sys, argparse, pandas as pd, numpy as np, yfinance as yf, logging, pickle, smtplib, gzip
 from email.mime.text import MIMEText
@@ -18,7 +16,6 @@ from bs4 import BeautifulSoup
 from sklearn.ensemble import IsolationForest
 import time
 import random
-import json
 
 # ── CONFIG ─────────────────────────────────────
 BASE_DIR = os.environ.get('APP_DIR', '/tmp/surge')
@@ -62,14 +59,10 @@ def get_session():
     session = requests.Session()
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
-    retry_strategy = Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504],
-    )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
+    retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
     session.headers.update({'User-Agent': random.choice(USER_AGENTS)})
     return session
 
@@ -230,12 +223,7 @@ def safe_yf_download(ticker, period='120d'):
 def get_premarket_data(ticker):
     try:
         stock = yf.Ticker(ticker)
-        hist = breaker.call(
-            stock.history,
-            period='1d',
-            interval='1m',
-            prepost=True
-        )
+        hist = breaker.call(stock.history, period='1d', interval='1m', prepost=True)
         if hist.empty: return None, None, None
         pre = hist.between_time('04:00', '09:30').copy()
         if pre.empty: return None, None, None
@@ -258,12 +246,7 @@ def get_yesterday_close(ticker):
 def get_today_data(ticker):
     try:
         stock = yf.Ticker(ticker)
-        hist = breaker.call(
-            stock.history,
-            period="1d",
-            interval="1d",
-            prepost=True
-        )
+        hist = breaker.call(stock.history, period="1d", interval="1d", prepost=True)
         if hist.empty: return None, None
         close = hist['Close'].iloc[-1].item()
         volume = int(hist['Volume'].iloc[-1]) if pd.notna(hist['Volume'].iloc[-1]) else 0
@@ -324,8 +307,7 @@ def get_news_sentiment(ticker):
         url = f"https://finance.yahoo.com/quote/{ticker}/news"
         session = get_session()
         resp = session.get(url, timeout=15)
-        if resp.status_code != 200:
-            return 0.0
+        if resp.status_code != 200: return 0.0
         soup = BeautifulSoup(resp.content, 'html.parser')
         headlines = [h.get_text(strip=True) for h in soup.find_all('h3')[:5]]
         if not headlines: return 0.0
@@ -439,11 +421,12 @@ def detect_surging_stocks(df, mode):
         return []
     return candidates.sort_values('expected_price', ascending=False).to_dict('records')
 
-# ── GENERATE OUTPUT ───────────────────────────
+# ── GENERATE HTML TABLE (NO .style / jinja2) ─────
 def generate_output(results, start_time, mode):
     if not results:
         results = []
     df = pd.DataFrame(results)
+    
     if df.empty:
         pd.DataFrame(columns=[
             'Ticker','Surge Time','Yesterday','Current','Exp Price','Gap','Volume','Ratio',
@@ -458,59 +441,76 @@ def generate_output(results, start_time, mode):
             'expected_price': 'Exp Price', 'expected_return': 'Exp Return'
         }
         df = df.rename(columns=rename_map)
-        for col in ['Yesterday','Current','Gap','Volume','Ratio','Anomaly','RSI','News','Score','Exp Price','Exp Return']:
+        for col in ['Gap','Ratio','Anomaly','RSI','News','Score','Volume','Exp Price','Exp Return']:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
-        fill = {'Gap':0,'Ratio':0,'Anomaly':0,'RSI':50.0,'News':0.0,'Score':0,'Volume':0,'Exp Price':0.0,'Exp Return':0.0}
-        for c,v in fill.items():
-            if c in df.columns:
-                df[c] = df[c].fillna(v)
-                if c in ('Anomaly','Score','Volume'):
-                    df[c] = df[c].astype(int)
-        if 'Mode' not in df.columns:
-            df['Mode'] = mode.upper()
-        order = ['Ticker','Yesterday','Current','Exp Price','Surge Time','Gap','Volume','Ratio',
-                 'RSI','News','Sentiment','Action']
-        df = df[[c for c in order if c in df.columns]]
-        df.to_csv(CSV_OUT, index=False)
-        
-        fmt = {
-            'Yesterday':'{:.2f}','Current':'{:.2f}','Gap':'{:+.1%}','Volume':'{:,}',
-            'Ratio':'{:.1f}x','Anomaly':'{:.0f}','RSI':'{:.1f}','News':'{:+.2f}','Score':'{:.0f}',
-            'Exp Price':'{:.2f}','Exp Return':'{:+.1%}','Surge Time':'{}'
-        }
-        def make_sentiment_html(val):
-            mapping = {'Bullish': ('#16a34a', '#fff'), 'Bearish': ('#dc2626', '#fff'), 'Neutral': ('#6b7280', '#fff')}
-            bg, fg = mapping.get(str(val).strip(), ('#e5e7eb', '#374151'))
-            return f'<span style="background:{bg};color:{fg};padding:6px 14px;border-radius:9999px;font-weight:600;">{val}</span>'
-        def make_action_html(val):
-            mapping = {'Buy': ('#16a34a', '#fff'), 'Sell': ('#dc2626', '#fff'), 'Hold': ('#f97316', '#fff')}
-            bg, fg = mapping.get(str(val).strip(), ('#e5e7eb', '#374151'))
-            return f'<span style="background:{bg};color:{fg};padding:6px 14px;border-radius:9999px;font-weight:600;">{val}</span>'
-        def make_surge_html(val):
-            return f'<span style="background:#1e40af;color:white;padding:4px 10px;border-radius:6px;font-weight:600;">{val} CST</span>'
-        
-        df_html = df.copy()
-        df_html['Sentiment'] = df_html['Sentiment'].apply(make_sentiment_html)
-        df_html['Action'] = df_html['Action'].apply(make_action_html)
-        df_html['Surge Time'] = df_html['Surge Time'].apply(make_surge_html)
-        
-        right_align = ['Yesterday','Current','Gap','Exp Price','Volume','Ratio','Anomaly','RSI','News','Score','Exp Return']
-        styles = []
-        for i, col in enumerate(df_html.columns, 1):
-            align = 'right' if col in right_align else 'center'
-            styles.extend([
-                {'selector': f'th:nth-child({i})', 'props': f'text-align:{align};'},
-                {'selector': f'td:nth-child({i})', 'props': f'text-align:{align};'}
-            ])
-        
-        styled = (df_html.style
-                  .set_table_styles(styles)
-                  .format(fmt)
-                  .set_properties(**{'font-family': 'system-ui, sans-serif'})
-                  .hide(axis="index"))
-        table_html = styled.to_html(index=False, border=0, escape=False)
-        
+        df['Gap'] = df['Gap'].fillna(0)
+        df['Ratio'] = df['Ratio'].fillna(0)
+        df['Anomaly'] = df['Anomaly'].fillna(0).astype(int)
+        df['RSI'] = df['RSI'].fillna(50.0)
+        df['News'] = df['News'].fillna(0.0)
+        df['Score'] = df['Score'].fillna(0).astype(int)
+        df['Volume'] = df['Volume'].fillna(0).astype(int)
+        df['Exp Price'] = df['Exp Price'].fillna(0.0)
+        df['Exp Return'] = df['Exp Return'].fillna(0.0)
+
+        # === HTML TABLE ===
+        html_rows = []
+        for _, row in df.iterrows():
+            gap_style = 'color:#16a34a;font-weight:600' if row['Gap'] > 0 else 'color:#dc2626;font-weight:600'
+            sentiment_bg = '#16a34a' if row['Sentiment'] == 'Bullish' else '#dc2626' if row['Sentiment'] == 'Bearish' else '#6b7280'
+            sentiment_fg = '#fff'
+            action_bg = '#16a34a' if row['Action'] == 'Buy' else '#dc2626' if row['Action'] == 'Sell' else '#f97316'
+            action_fg = '#fff'
+            surge_bg = '#1e40af'
+            surge_fg = 'white'
+
+            html_rows.append(f"""
+            <tr>
+                <td style="text-align:left">{row['Ticker']}</td>
+                <td style="text-align:right">{row['Yesterday']:.2f}</td>
+                <td style="text-align:right">{row['Current']:.2f}</td>
+                <td style="text-align:right">{row['Exp Price']:.2f}</td>
+                <td style="text-align:center"><span style="background:{surge_bg};color:{surge_fg};padding:4px 10px;border-radius:6px;font-weight:600;">{row['Surge Time']} CST</span></td>
+                <td style="text-align:right;{gap_style}">{row['Gap']:+.1%}</td>
+                <td style="text-align:right">{row['Volume']:,}</td>
+                <td style="text-align:right">{row['Ratio']:.1f}x</td>
+                <td style="text-align:right">{row['Anomaly']}</td>
+                <td style="text-align:right">{row['RSI']:.1f}</td>
+                <td style="text-align:right">{row['News']:+.2f}</td>
+                <td style="text-align:right">{row['Score']:.0f}</td>
+                <td style="text-align:center"><span style="background:{sentiment_bg};color:{sentiment_fg};padding:6px 14px;border-radius:9999px;font-weight:600;">{row['Sentiment']}</span></td>
+                <td style="text-align:center"><span style="background:{action_bg};color:{action_fg};padding:6px 14px;border-radius:9999px;font-weight:600;">{row['Action']}</span></td>
+            </tr>
+            """)
+
+        html_table = f"""
+        <table style="width:100%;border-collapse:collapse;margin-top:20px;font-size:.95em">
+            <thead>
+                <tr style="background:#1e40af;color:white">
+                    <th style="padding:14px 12px;text-align:left">Ticker</th>
+                    <th style="padding:14px 12px;text-align:right">Yesterday</th>
+                    <th style="padding:14px 12px;text-align:right">Current</th>
+                    <th style="padding:14px 12px;text-align:right">Exp Price</th>
+                    <th style="padding:14px 12px;text-align:center">Surge Time</th>
+                    <th style="padding:14px 12px;text-align:right">Gap</th>
+                    <th style="padding:14px 12px;text-align:right">Volume</th>
+                    <th style="padding:14px 12px;text-align:right">Ratio</th>
+                    <th style="padding:14px 12px;text-align:right">Anomaly</th>
+                    <th style="padding:14px 12px;text-align:right">RSI</th>
+                    <th style="padding:14px 12px;text-align:right">News</th>
+                    <th style="padding:14px 12px;text-align:right">Score</th>
+                    <th style="padding:14px 12px;text-align:center">Sentiment</th>
+                    <th style="padding:14px 12px;text-align:center">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {''.join(html_rows)}
+            </tbody>
+        </table>
+        """
+
+        # Sortable JS
         sortable_js = """
         <script>
         document.addEventListener('DOMContentLoaded', function() {
@@ -522,50 +522,53 @@ def generate_output(results, start_time, mode):
                 header.onclick = () => sortTable(index);
             });
             function sortTable(colIdx) {
-                const rows = Array.from(table.querySelectorAll('tr')).slice(1);
+                const rows = Array.from(table.querySelectorAll('tbody tr'));
                 const multiplier = table.querySelectorAll('th')[colIdx].classList.toggle('asc') ? 1 : -1;
                 table.querySelectorAll('th').forEach(th => th.classList.remove('asc'));
                 rows.sort((a, b) => {
                     let aText = a.cells[colIdx].innerText.trim();
                     let bText = b.cells[colIdx].innerText.trim();
-                    aText = parseFloat(aText.replace(/[$,%x]/g, '')) || 0;
-                    bText = parseFloat(bText.replace(/[$,%x]/g, '')) || 0;
-                    return (aText > bText ? 1 : -1) * multiplier;
+                    let aVal = parseFloat(aText.replace(/[$,%x]/g, '')) || 0;
+                    let bVal = parseFloat(bText.replace(/[$,%x]/g, '')) || 0;
+                    return (aVal > bVal ? 1 : -1) * multiplier;
                 });
-                rows.forEach(row => table.appendChild(row));
+                rows.forEach(row => table.querySelector('tbody').appendChild(row));
                 table.querySelectorAll('th')[colIdx].classList.add('asc');
             }
+            // Auto-sort by Exp Price descending
+            setTimeout(() => {
+                const expIdx = Array.from(headers).findIndex(th => th.innerText.includes('Exp Price'));
+                if (expIdx !== -1) { document.querySelectorAll('th')[expIdx].click(); document.querySelectorAll('th')[expIdx].click(); }
+            }, 100);
         });
         </script>
         <style>
         th:hover { background:#1e3a8a !important; }
-        th.asc::after { content:' ↓'; }
+        th.asc::after { content:' down arrow'; }
         </style>
         """
-        html_table = table_html + sortable_js
+        html_table += sortable_js
 
+    # === FULL HTML EMAIL ===
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>{mode.upper()} Surge Report</title>
 <style>
 body{{font-family:system-ui;margin:40px;background:#f0f4f8}}
 .container{{max-width:1200px;margin:auto;background:white;padding:30px;border-radius:16px;box-shadow:0 4px 20px rgba(0,0,0,.1)}}
-table{{width:100%;border-collapse:collapse;margin-top:20px;font-size:.95em}}
-th{{background:#1e40af;color:white;padding:14px 12px;font-weight:600}}
-td{{padding:12px;border-bottom:1px solid #eee}}
-tr:hover{{background:#f0f9ff}}
 .header-title{{font-size:2em;margin:0 0 8px;color:#1e40af;text-align:center}}
 </style></head>
 <body><div class="container">
 <h1 class="header-title">Penny Stocks Surge Report</h1>
 <h3 style="text-align:center">{start_time.strftime('%Y-%m-%d')}</h3>
-<p><strong>Mode:</strong> {mode.upper()} | <strong>Signals:</strong> {len(results)}</p>
+<p style="text-align:center"><strong>Mode:</strong> {mode.upper()} | <strong>Signals:</strong> {len(results)}</p>
 {html_table}
-<p><strong>Generated:</strong> {start_time.strftime('%Y-%m-%d %H:%M:%S %Z')}</p>
+<p style="text-align:center"><strong>Generated:</strong> {start_time.strftime('%Y-%m-%d %H:%M:%S %Z')}</p>
 </div></body></html>"""
-    
+
     with open(HTML_OUT, 'w', encoding='utf-8') as f:
         f.write(html)
-    
+
+    # === SEND EMAIL ===
     try:
         msg = MIMEMultipart()
         msg['From'] = EMAIL_SENDER
