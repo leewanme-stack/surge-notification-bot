@@ -159,77 +159,9 @@ def save_price_cache(prices):
     except Exception as e:
         logging.warning(f"Cache save failed: {e}")
 
-# ── PENNY FILTER (WITH FIXES) ─────────────────
-@retry(tries=7, delay=3, backoff=2)
-@retry(tries=7, delay=3, backoff=2)
-def filter_penny_chunk(chunk):
-    try:
-        data = yf.download(
-            chunk,
-            period='5d',
-            interval='1d',
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-            repair=True,
-            timeout=30,
-            raise_errors=True
-        )
-        if data is None or data.empty:
-            return [], {}
-
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.droplevel(1)
-
-        if 'Close' not in data.columns:
-            return [], {}
-
-        latest = data['Close'].iloc[-2]
-        latest = latest.dropna()
-        valid = latest[(latest >= MIN_PRICE) & (latest <= MAX_PRICE)]
-        return valid.index.tolist(), valid.to_dict()
-
-    except Exception as e:
-        if any(k in str(e) for k in ['JSONDecodeError', 'Expecting value', '404']):
-            logging.info(f"filter_penny_chunk: Empty response for chunk {chunk}")
-        else:
-            logging.warning(f"filter_penny_chunk failed: {e}")
-        return [], {}
-
-@retry(tries=7, delay=3, backoff=2)
-def filter_penny_chunk(chunk):
-    try:
-        data = yf.download(
-            chunk,
-            period='5d',
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-            repair=True,
-            timeout=30
-        )
-        if data is None or data.empty:
-            return [], {}
-
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.droplevel(1)
-
-        if 'Close' not in data.columns:
-            return [], {}
-
-        latest = data['Close'].iloc[-2]
-        latest = latest.dropna()
-        valid = latest[(latest >= MIN_PRICE) & (latest <= MAX_PRICE)]
-        return valid.index.tolist(), valid.to_dict()
-
-    except Exception as e:
-        if any(k in str(e) for k in ['JSONDecodeError', 'Expecting value', '404']):
-            logging.info(f"filter_penny_chunk: Empty chunk {chunk}")
-        else:
-            logging.warning(f"filter_penny_chunk failed: {e}")
-        return [], {}
-
-# ── SAFE YFINANCE WRAPPERS (SYNTAX-FIXED + JSON-SAFE) ────────────────────
+# ──────────────────────────────────────────────────────────────────────
+#  SAFE YFINANCE WRAPPERS – NO SYNTAX ERROR, NO JSONDECODEERROR
+# ──────────────────────────────────────────────────────────────────────
 @retry(tries=7, delay=3, backoff=2)
 def safe_yf_download(ticker, period='120d'):
     try:
@@ -254,8 +186,8 @@ def safe_yf_download(ticker, period='120d'):
 
         return data
 
-    except Exception as e:
-        if any(k in str(e) for k in ['JSONDecodeError', 'Expecting value', '404', 'empty']):
+    except Exception as e:                     # ← REQUIRED FOR @retry
+        if any(k in str(e) for k in ['JSONDecodeError', 'Expecting value', '404']):
             logging.info(f"safe_yf_download: Invalid JSON for {ticker}")
         else:
             logging.warning(f"safe_yf_download failed for {ticker}: {e}")
@@ -283,10 +215,10 @@ def get_premarket_data(ticker):
             return None, None, None
 
         price = pre['Close'].iloc[-1]
-        vol = int(pre['Volume'].sum())
+        vol   = int(pre['Volume'].sum())
         return float(price), vol, pre
 
-    except Exception as e:
+    except Exception as e:                     # ← REQUIRED FOR @retry
         if 'JSONDecodeError' in str(e) or 'Expecting value' in str(e):
             logging.info(f"get_premarket_data: Empty premarket for {ticker}")
         else:
@@ -310,7 +242,8 @@ def get_yesterday_close(ticker):
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.droplevel(1)
         return float(data['Close'].iloc[-2])
-    except Exception as e:
+
+    except Exception as e:                     # ← REQUIRED FOR @retry
         if 'JSONDecodeError' in str(e):
             logging.info(f"get_yesterday_close: No data for {ticker}")
         return None
@@ -339,47 +272,15 @@ def filter_penny_chunk(chunk):
 
         latest = data['Close'].iloc[-2]
         latest = latest.dropna()
-        valid = latest[(latest >= MIN_PRICE) & (latest <= MAX_PRICE)]
+        valid  = latest[(latest >= MIN_PRICE) & (latest <= MAX_PRICE)]
         return valid.index.tolist(), valid.to_dict()
 
-    except Exception as e:
+    except Exception as e:                     # ← REQUIRED FOR @retry
         if any(k in str(e) for k in ['JSONDecodeError', 'Expecting value', '404']):
             logging.info(f"filter_penny_chunk: Empty chunk {chunk}")
         else:
             logging.warning(f"filter_penny_chunk failed: {e}")
         return [], {}
-
-@retry(tries=7, delay=3, backoff=2)
-def get_premarket_data(ticker):
-    try:
-        data = yf.download(
-            ticker,
-            period='1d',
-            interval='1m',
-            prepost=True,
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-            timeout=30
-        )
-        if data.empty:
-            return None, None, None
-
-        pre = data.between_time('04:00', '09:30')
-        if pre.empty:
-            return None, None, None
-
-        price = pre['Close'].iloc[-1]
-        vol = int(pre['Volume'].sum())
-        return float(price), vol, pre
-
-    except Exception as e:
-        if 'JSONDecodeError' in str(e) or 'Expecting value' in str(e):
-            logging.info(f"get_premarket_data: Empty premarket for {ticker}")
-        else:
-            logging.warning(f"get_premarket_data failed: {e}")
-        return None, None, None
-
 
 @retry(tries=5, delay=2, backoff=1.5)
 def get_yesterday_close(ticker):
@@ -695,6 +596,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     main(mode=args.mode, debug_ticker=args.debug_ticker, debug=args.debug)
+
 
 
 
