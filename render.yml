@@ -1,0 +1,16 @@
+# render.yaml (optional — only if scaling up)
+services:
+  - type: cron
+    name: surge-premarket
+    env: python
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: python stocks-surge-detector.py --mode premarket
+    schedule: "30 12 * * 1-5"  # 6:30 AM CST = 12:30 UTC
+    envVars:
+      EMAIL_SENDER:
+        value: rizahmed.me@gmail.com
+      EMAIL_PASSWORD:
+        generate: true  # or from secret
+      EMAIL_RECIPIENTS:
+        value: rizahmed.me@gmail.com,leewan.me@gmail.com
