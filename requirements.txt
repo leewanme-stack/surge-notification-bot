@@ -1,4 +1,4 @@
-yfinance==0.2.43
+yfinance==0.2.40
 pandas==2.2.2
 numpy==1.26.4
 textblob==0.18.0.post0
